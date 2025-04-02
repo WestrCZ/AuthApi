@@ -65,57 +65,53 @@ public class ConnectController : ControllerBase
     }
 
     [HttpPost("token")]
-    public async Task<IActionResult> Exchange([FromForm] TokenRequestDto tokenRequestDto)
+    public async Task<IActionResult> Exchange()
     {
-        _logger.LogInformation("Token exchange requested for user: {Username}", tokenRequestDto.Username);
-
-        // Validate the incoming token request
-        if (string.IsNullOrEmpty(tokenRequestDto.Username) || string.IsNullOrEmpty(tokenRequestDto.Password))
+        var request = HttpContext.GetOpenIddictServerRequest();
+        if (request == null)
         {
-            return BadRequest("Username and password are required.");
+            return BadRequest("Invalid OpenID Connect request.");
         }
 
-        // Find the user by username
-        var user = await _userManager.FindByNameAsync(tokenRequestDto.Username);
-        if (user == null)
+        if (request.IsPasswordGrantType())
         {
-            _logger.LogWarning("Token exchange failed for: {Username} - User not found", tokenRequestDto.Username);
-            return Unauthorized("Invalid username or password.");
+            _logger.LogInformation("Token exchange requested for user: {Username}", request.Username);
+
+            var user = await _userManager.FindByNameAsync(request.Username);
+            if (user == null || !await _userManager.CheckPasswordAsync(user, request.Password))
+            {
+                _logger.LogWarning("Token exchange failed - Invalid credentials for user: {Username}", request.Username);
+                return Unauthorized("Invalid username or password.");
+            }
+
+            _logger.LogInformation("User {Username} authenticated. Generating token.", request.Username);
+
+            var identity = new ClaimsIdentity(OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
+
+            // Add required claims
+            identity.AddClaim(OpenIddictConstants.Claims.Subject, user.Id);
+            identity.AddClaim(OpenIddictConstants.Claims.Name, user.UserName!);
+            identity.AddClaim(OpenIddictConstants.Claims.Audience, "AuthApi");
+
+            // Set scopes (ensure they are valid)
+            identity.SetScopes(OpenIddictConstants.Scopes.Email,
+                               OpenIddictConstants.Scopes.Profile,
+                               OpenIddictConstants.Scopes.Roles);
+
+            // Optionally log the claims
+            foreach (var claim in identity.Claims)
+            {
+                _logger.LogInformation($"Claim: {claim.Type} = {claim.Value}");
+            }
+
+            // Create a new ClaimsPrincipal with the new identity
+            var principal = new ClaimsPrincipal(identity);
+
+            // Sign in with OpenIddict authentication scheme
+            return SignIn(principal, OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
         }
 
-        // Check if the password is correct
-        var result = await _signInManager.PasswordSignInAsync(user, tokenRequestDto.Password, false, false);
-        if (!result.Succeeded)
-        {
-            _logger.LogWarning("Token exchange failed for: {Username} - Invalid credentials", tokenRequestDto.Username);
-            return Unauthorized("Invalid username or password.");
-        }
-
-        _logger.LogInformation("User {Username} successfully authenticated. Generating token.", tokenRequestDto.Username);
-
-        // Generate the token
-        var claims = new[]
-        {
-        new Claim(ClaimTypes.Name, user.UserName),
-        new Claim(ClaimTypes.Email, user.Email),
-        new Claim(JwtRegisteredClaimNames.Sub, user.Id),
-        new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
-    };
-
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes("your_secret_key_here"));
-        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-
-        var token = new JwtSecurityToken(
-            issuer: "your_issuer_here",
-            audience: "your_audience_here",
-            claims: claims,
-            expires: DateTime.Now.AddHours(1),
-            signingCredentials: creds
-        );
-
-        var tokenString = new JwtSecurityTokenHandler().WriteToken(token);
-
-        return Ok(new { access_token = tokenString, token_type = "bearer", expires_in = 3600 });
+        return BadRequest("Unsupported grant type.");
     }
 
     public class TokenRequestDto

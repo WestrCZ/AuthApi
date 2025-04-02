@@ -55,6 +55,8 @@ public class Program
             })
             .AddServer(options =>
             {
+                options.SetIssuer("https://localhost:5001");
+
                 options.SetAuthorizationEndpointUris("/connect/authorize")
                     .SetTokenEndpointUris("/connect/token");
 
