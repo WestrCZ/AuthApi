@@ -4,8 +4,8 @@ using Microsoft.IdentityModel.Tokens;
 using AuthApi.Data;
 using Microsoft.AspNetCore.Identity;
 using System.Security.Cryptography;
-using Swashbuckle.AspNetCore.SwaggerGen;
 using Microsoft.OpenApi.Models;
+using OpenIddict.Validation.AspNetCore;
 
 namespace AuthApi;
 
@@ -36,11 +36,15 @@ public class Program
         var publicKeyBase64 = configuration["Jwt:PublicKey"];
 
         if (string.IsNullOrEmpty(privateKeyBase64) || string.IsNullOrEmpty(publicKeyBase64))
-            throw new InvalidOperationException("RSA keys are missing from User Secrets. Set them using 'dotnet user-secrets set'.");
+            throw new InvalidOperationException("RSA keys are missing from configuration.");
 
-        // Convert Base64 keys back to RSA
-        var rsa = RSA.Create();
-        rsa.ImportFromPem(privateKeyBase64);
+        // Načtení privátního klíče
+        var rsaPriv = RSA.Create();
+        rsaPriv.ImportFromPem(privateKeyBase64);
+
+        // Načtení veřejného klíče
+        var rsaPublic = RSA.Create();
+        rsaPublic.ImportFromPem(publicKeyBase64);
 
         // Add OpenIddict services
         builder.Services.AddOpenIddict()
@@ -57,28 +61,44 @@ public class Program
                 options.AllowPasswordFlow()
                     .AllowRefreshTokenFlow();
 
-                // Use RSA keys for signing JWTs
-                options.AddSigningKey(new RsaSecurityKey(rsa));
+                options.AcceptAnonymousClients();
 
-                // Enable JWT tokens
-                options.UseReferenceAccessTokens();
+                // Use RSA keys for signing JWTs
+                options.AddSigningKey(new RsaSecurityKey(rsaPriv));
+                options.AddEncryptionKey(new RsaSecurityKey(rsaPriv));
+
+                // Set token lifetimes.
+                options.SetAccessTokenLifetime(TimeSpan.FromMinutes(15));
+                options.SetRefreshTokenLifetime(TimeSpan.FromMinutes(60)); // Adjust as needed.
+
+                options.UseAspNetCore()
+                    .EnableTokenEndpointPassthrough()
+                    .EnableAuthorizationEndpointPassthrough();
             })
-            .AddValidation();
+            .AddValidation(options =>
+            {
+                options.UseLocalServer();
+                options.UseAspNetCore();
+            });
 
         // Add JWT authentication
-        builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+        builder.Services.AddAuthentication(options =>
+        {
+            options.DefaultAuthenticateScheme = OpenIddictValidationAspNetCoreDefaults.AuthenticationScheme;
+            options.DefaultChallengeScheme = OpenIddictValidationAspNetCoreDefaults.AuthenticationScheme;
+            options.DefaultScheme = OpenIddictValidationAspNetCoreDefaults.AuthenticationScheme; // Ensure no cookies!
+        })
             .AddJwtBearer(options =>
             {
                 options.Authority = "https://localhost:5001"; // Replace with your auth server's URL
-                options.Audience = "api"; // Set to your audience (if needed)
-                options.RequireHttpsMetadata = true;
+                options.Audience = "AuthApi"; // Set to your audience (if needed)
                 options.TokenValidationParameters = new TokenValidationParameters
                 {
                     ValidateIssuer = true,
                     ValidateAudience = true,
                     ValidateLifetime = true,
                     ValidateIssuerSigningKey = true,
-                    IssuerSigningKey = new RsaSecurityKey(rsa) // Use the same RSA key for validation
+                    IssuerSigningKey = new RsaSecurityKey(rsaPriv) // Use the same RSA key for validation
                 };
             });
 
